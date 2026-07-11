@@ -1,0 +1,8 @@
+tools/
+tests/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+wandb/
+outputs/
+checkpoints/
