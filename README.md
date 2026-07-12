@@ -9,6 +9,7 @@
 - [Setup](#setup)
 - [Training](#training)
 - [KVEraser Evaluation](#kveraser-evaluation)
+- [Exact Recompute Baseline Evaluation](#exact-recompute-baseline-evaluation)
 
 ## Setup
 
@@ -28,6 +29,7 @@ wandb login
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 python train.py \
+  --model Qwen/Qwen3-8B \
   --output_dir checkpoints/kveraser_niah_joint \
   --wandb_project kveraser-niah
 ```
@@ -41,27 +43,13 @@ CUDA_VISIBLE_DEVICES=0 python evaluate_kveraser.py \
   --placement single_gpu
 ```
 
-## Exact Recompute Evaluation
-
-Exact recomputation has no eraser checkpoint dependency:
+## Exact Recompute Baseline Evaluation
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python evaluate_recompute.py \
   --model Qwen/Qwen3-8B \
   --placement single_gpu
 ```
-
-It removes the designated span from the cached prompt, reuses the valid prefix cache, recomputes the complete edited suffix, then uses the same delayed-query processing and greedy decoding behavior as KVEraser.
-
-## Timing Boundary
-
-Both evaluation scripts prefill the original context before timing starts. Timed latency begins after the original-context KV cache exists and includes:
-
-- KVEraser cache editing or exact suffix recomputation
-- delayed-query processing
-- complete greedy decoding
-
-CUDA is synchronized around timed regions. One untimed warmup sample is run per context. The scripts print GPU name/count, Torch/CUDA versions, dtype, attention backend, and resolved generator device map.
 
 ## Citation
 
