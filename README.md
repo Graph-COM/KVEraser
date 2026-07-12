@@ -4,49 +4,23 @@
 
 ![fig](theme_figure.png)
 
+## Table of Contents
+
+- [Setup](#setup)
+
 ## Setup
 
-Use a CUDA environment where PyTorch can see the intended GPU(s). The scripts raise immediately if CUDA is unavailable.
-
 ```bash
-conda create -n kveraser-niah python=3.11 -y
-conda activate kveraser-niah
-
-# Install the PyTorch build matching your CUDA driver first if needed.
+conda create -n kveraser python=3.11 -y
+conda activate kveraser
 pip install -r requirements.txt
 ```
 
-Authenticate for gated model or dataset access and W&B logging:
+Authenticate for W&B logging:
 
 ```bash
-hf auth login
 wandb login
 ```
-
-Set `HF_HUB_OFFLINE=1` or `TRANSFORMERS_OFFLINE=1` only after the model and dataset are already cached locally.
-
-## Dataset
-
-The scripts first look for local Parquet files under the release directory:
-
-```text
-data/niah/ctx1000_t32/{train,validation,test}-00000-of-00001.parquet
-```
-
-If a complete local split set is not present for a context, the scripts automatically download that context from the public Hugging Face dataset repository `Graph-COM/KVEraser`.
-
-Expected Hugging Face configs are:
-
-```text
-niah_ctx1000_t32
-niah_ctx2000_t32
-niah_ctx4000_t32
-niah_ctx8000_t32
-niah_ctx16000_t32
-niah_ctx32000_t32
-```
-
-Each config contains `train`, `validation`, and `test` splits with 200, 100, and 100 rows respectively.
 
 ## Training
 
