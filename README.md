@@ -1,4 +1,6 @@
-# KVEraser NIAH Release
+# KVEraser
+
+[![arXiv](https://img.shields.io/badge/📄arXiv-2606.17034-ff6b6b?style=for-the-badge&logo=arxiv&logoColor=white&labelColor=1a1a2e)](https://arxiv.org/abs/2606.17034)
 
 This directory is a standalone Apache-2.0 implementation of the NIAH experiment from KVEraser. It trains one full KVEraser backbone jointly across six context sizes and evaluates KVEraser and exact recomputation with separate scripts.
 
