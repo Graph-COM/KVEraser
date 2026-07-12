@@ -7,6 +7,8 @@
 ## Table of Contents
 
 - [Setup](#setup)
+- [Training](#training)
+- [KVEraser Evaluation](#kveraser-evaluation)
 
 ## Setup
 
@@ -64,15 +66,6 @@ Both evaluation scripts prefill the original context before timing starts. Timed
 - complete greedy decoding
 
 CUDA is synchronized around timed regions. One untimed warmup sample is run per context. The scripts print GPU name/count, Torch/CUDA versions, dtype, attention backend, and resolved generator device map.
-
-## Local Dataset Publication Tool
-
-`tools/publish_niah.py` is intentionally ignored by Git. It validates and writes the Hugging Face dataset layout locally and can optionally upload it when credentials are available:
-
-```bash
-python tools/publish_niah.py --output_dir /tmp/KVEraser_hf_dataset
-python tools/publish_niah.py --output_dir /tmp/KVEraser_hf_dataset --push --repo_id Graph-COM/KVEraser
-```
 
 ## Citation
 
