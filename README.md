@@ -34,16 +34,12 @@ CUDA_VISIBLE_DEVICES=0,1 python train.py \
 
 ## KVEraser Evaluation
 
-Run latency evaluation with one visible 80GB A100 and explicit single-GPU placement:
-
 ```bash
 CUDA_VISIBLE_DEVICES=0 python evaluate_kveraser.py \
   --model Qwen/Qwen3-8B \
   --checkpoint checkpoints/kveraser_niah_joint \
   --placement single_gpu
 ```
-
-The script loads the frozen generator and trained eraser, evaluates all six 100-example test splits, and prints per-context sample count, EM, total latency, average latency, average generated tokens, editing latency, delayed-query latency, decoding latency, and macro EM.
 
 ## Exact Recompute Evaluation
 
