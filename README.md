@@ -24,27 +24,11 @@ wandb login
 
 ## Training
 
-Paper protocol defaults are Qwen3-8B, six context sizes from 1K to 32K, batch size 1, AdamW, learning rate `1e-5`, weight decay `0.01`, gradient clipping at `1`, and one epoch.
-
-Two-GPU training command:
-
-```bash
-CUDA_VISIBLE_DEVICES=0,1 python train.py --placement balanced
-```
-
-Useful explicit form:
-
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 python train.py \
-  --model Qwen/Qwen3-8B \
-  --placement balanced \
   --output_dir checkpoints/kveraser_niah_joint \
   --wandb_project kveraser-niah
 ```
-
-The script concatenates the six 200-row train splits into one seed-shuffled 1,200-example sweep. It logs per-step loss, learning rate, gradient norm, per-context validation EM, and macro validation EM. The eraser backbone is saved with safetensors plus `run_config.json` metadata.
-
-Use `--wandb_mode offline` or `--wandb_mode disabled` when needed.
 
 ## KVEraser Evaluation
 
