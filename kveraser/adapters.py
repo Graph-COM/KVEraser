@@ -101,6 +101,18 @@ class SharedBackboneAdapterRouter:
     Use routed KVEraser methods for inference on the shared backbone.
     """
 
+    _creation_lock = RLock()
+
+    @classmethod
+    def for_backbone(cls, backbone):
+        """Share routing state and its lock across all wrappers of a backbone."""
+        with cls._creation_lock:
+            router = getattr(backbone, "_kveraser_adapter_router", None)
+            if router is None:
+                router = cls(backbone)
+                backbone._kveraser_adapter_router = router
+            return router
+
     def __init__(self, backbone):
         if any(parameter.requires_grad for parameter in backbone.parameters()):
             raise ValueError("Shared adapter routing requires a frozen backbone and adapter.")

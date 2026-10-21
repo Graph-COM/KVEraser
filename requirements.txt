@@ -6,7 +6,7 @@ pandas==2.3.3
 peft==0.18.0
 pyarrow==23.0.1
 safetensors==0.7.0
-torch>=2.6
+torch==2.6.0
 tqdm==4.67.1
 transformers==4.57.6
 wandb==0.25.0

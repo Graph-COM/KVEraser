@@ -11,9 +11,10 @@ from typing import Any
 import pyarrow.parquet as pq
 from huggingface_hub import hf_hub_download, snapshot_download
 
-from .schema import DATA_PREFIX, DATASETS, data_path, parquet_schema, validate_record
+from .schema import (
+    CONTEXT_SIZES, DATA_PREFIX, DATASETS, data_path, parquet_schema, validate_record,
+)
 
-CONTEXT_SIZES = (1000, 2000, 4000, 8000, 16000, 32000)
 TOKENS_TO_GENERATE = 32
 TRAIN_ROWS_PER_CONTEXT = 200
 VALIDATION_ROWS_PER_CONTEXT = 100
