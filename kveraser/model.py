@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from functools import wraps
+import math
 
 import torch
 import torch.nn as nn
@@ -10,6 +11,8 @@ from transformers.cache_utils import DynamicCache
 
 from .cache import can_write_span, discard_span, restore_span_on_error, span_write_cache
 from .runtime import effective_model_max_length
+
+PARTIAL_RECOMPUTE_FRACTION = 0.15
 
 
 def _adapter_mode(enabled):
@@ -231,6 +234,40 @@ class KVEraser(nn.Module):
         """Remove cached tokens in place and shift the suffix keys' RoPE positions."""
         rotary = self._base_transformer(self.generator).rotary_emb
         return discard_span(old_context_kv, erase_start, erase_end, rotary)
+
+    @torch.no_grad()
+    @_adapter_mode(False)
+    def partial_recompute_dropped_cache(self, old_context_kv, cached_input_ids, erase_start, erase_end, anchor):
+        """Consume a cache, discard a span, then recompute a 15% erase/query window."""
+        length = self._cache_seq_len(old_context_kv)
+        if (cached_input_ids.shape != (1, length)
+                or any(key.shape[0] != 1 for key, _ in old_context_kv)):
+            raise ValueError("Partial recompute requires one sequence with matching token and cache lengths.")
+        if (type(erase_start) is not int or type(erase_end) is not int
+                or not 0 <= erase_start < erase_end <= length):
+            raise ValueError("Erase span is empty or out of bounds.")
+        dropped_len = length - (erase_end - erase_start)
+        if dropped_len < 1 or anchor not in ("erase", "query"):
+            raise ValueError("Partial recompute requires a nonempty remaining context and an erase/query anchor.")
+        window_len = math.ceil(PARTIAL_RECOMPUTE_FRACTION * dropped_len)
+        start = min(erase_start, dropped_len - window_len) if anchor == "erase" else dropped_len - window_len
+        end = start + window_len
+        device = self._model_input_device(self.generator)
+        ids = torch.cat((cached_input_ids[:, :erase_start], cached_input_ids[:, erase_end:]), dim=1).to(device)
+        cache = self.discard_span_cache(old_context_kv, erase_start, erase_end)
+        prefix = (self._clone_prefix_cache(cache, start, self._model_layers(self.generator)) if start else None)
+        step = self._base_transformer(self.generator)(
+            input_ids=ids[:, start:end],
+            attention_mask=torch.ones((1, end), dtype=torch.long, device=device),
+            past_key_values=prefix, use_cache=True, return_dict=True,
+        )
+        if anchor == "query":
+            cache.layers.clear()
+            return step.past_key_values
+        for layer, (key, value) in zip(cache.layers, step.past_key_values):
+            layer.keys[:, :, start:end].copy_(key[:, :, start:end])
+            layer.values[:, :, start:end].copy_(value[:, :, start:end])
+        return cache
 
     @torch.no_grad()
     @_adapter_mode(False)
