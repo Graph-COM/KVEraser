@@ -1,8 +1,45 @@
-"""In-place span writes for Qwen3 inference; training keeps dynamic caches."""
+"""Qwen3 inference cache updates and RoPE position correction."""
 from contextlib import contextmanager
 
 import torch
 from transformers.cache_utils import Cache, DynamicCache, DynamicLayer
+from transformers.models.qwen3.modeling_qwen3 import rotate_half
+
+
+def shift_key_positions(keys, rotary_emb, old_start, new_start):
+    """Undo the old RoPE rotation and rotate a contiguous key span at its new positions."""
+    positions = torch.arange(keys.shape[2], device=keys.device)
+    old_cos, old_sin = rotary_emb(keys, (positions + old_start).unsqueeze(0))
+    new_cos, new_sin = rotary_emb(keys, (positions + new_start).unsqueeze(0))
+    old_cos, old_sin = old_cos.to(keys), old_sin.to(keys)
+    new_cos, new_sin = new_cos.to(keys), new_sin.to(keys)
+    unrotated = keys * old_cos.unsqueeze(1) - rotate_half(keys) * old_sin.unsqueeze(1)
+    return unrotated * new_cos.unsqueeze(1) + rotate_half(unrotated) * new_sin.unsqueeze(1)
+
+
+@torch.no_grad()
+def discard_span(cache, start, end, rotary_emb):
+    """Consume a dynamic cache, dropping a span and correcting suffix key positions."""
+    if (type(cache) not in (Cache, DynamicCache) or cache.offloading or not cache.layers
+            or any(type(layer) is not DynamicLayer or not layer.is_initialized for layer in cache.layers)):
+        raise ValueError("Discard requires an initialized, non-offloaded dynamic cache.")
+    length = cache.get_seq_length()
+    if type(start) is not int or type(end) is not int or not 0 <= start < end <= length:
+        raise ValueError("Discard span is empty or out of bounds.")
+    for layer in cache.layers:
+        key, value = layer.keys, layer.values
+        if (key.ndim != 4 or key.shape != value.shape or key.shape != cache.layers[0].keys.shape
+                or key.shape[2] != length
+                or key.device != value.device or key.dtype != value.dtype):
+            raise ValueError("Inconsistent KV shapes, devices or dtypes.")
+    for layer in cache.layers:
+        key, value = layer.keys, layer.values
+        suffix = key[:, :, end:]
+        if end < length:
+            suffix = shift_key_positions(suffix, rotary_emb, end, start)
+        layer.keys = torch.cat((key[:, :, :start], suffix), dim=2).contiguous()
+        layer.values = torch.cat((value[:, :, :start], value[:, :, end:]), dim=2).contiguous()
+    return cache
 
 
 @contextmanager

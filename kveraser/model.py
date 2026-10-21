@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers.cache_utils import DynamicCache
 
-from .cache import can_write_span, restore_span_on_error, span_write_cache
+from .cache import can_write_span, discard_span, restore_span_on_error, span_write_cache
 from .runtime import effective_model_max_length
 
 
@@ -224,6 +224,13 @@ class KVEraser(nn.Module):
 
     def forward(self, old_context_kv, erase_start, needle_ids):
         return self.erase_tokens(old_context_kv, erase_start, needle_ids)
+
+    @torch.no_grad()
+    @_adapter_mode(False)
+    def discard_span_cache(self, old_context_kv, erase_start, erase_end):
+        """Remove cached tokens in place and shift the suffix keys' RoPE positions."""
+        rotary = self._base_transformer(self.generator).rotary_emb
+        return discard_span(old_context_kv, erase_start, erase_end, rotary)
 
     @torch.no_grad()
     @_adapter_mode(False)
