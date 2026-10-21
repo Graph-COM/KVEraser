@@ -1,6 +1,21 @@
 """In-place span writes for Qwen3 inference; training keeps dynamic caches."""
+from contextlib import contextmanager
+
 import torch
 from transformers.cache_utils import Cache, DynamicCache, DynamicLayer
+
+
+@contextmanager
+def restore_span_on_error(cache, start, end):
+    """Back up only the overwritten span so a failed forward can be retried."""
+    spans = [tensor[:, :, start:end] for pair in cache for tensor in pair]
+    backups = [span.clone() for span in spans]
+    try:
+        yield
+    except BaseException:
+        for span, backup in zip(spans, backups):
+            span.copy_(backup)
+        raise
 
 
 def can_write_span(owner, cache, batch_size):

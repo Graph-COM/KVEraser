@@ -1,4 +1,4 @@
-"""Standalone KVEraser NIAH release package."""
+"""KVEraser for localized context erasing in KV caches."""
 
 from .model import KVEraser, answer_loss
 

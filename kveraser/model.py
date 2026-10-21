@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers.cache_utils import DynamicCache
 
-from .cache import can_write_span, span_write_cache
+from .cache import can_write_span, restore_span_on_error, span_write_cache
 from .runtime import effective_model_max_length
 
 
@@ -33,10 +33,10 @@ class KVEraser(nn.Module):
         self.model_max_len = effective_model_max_length(tokenizer, getattr(generator, "config", None))
         self.stop_token_ids = self._stop_token_ids(generator, tokenizer)
         self.adapter_router = None
-        if (eraser is not None and hasattr(eraser, "get_base_model")
-                and eraser.get_base_model() is self._base_transformer(generator)):
+        backbone = self._base_transformer(generator)
+        if hasattr(backbone, "peft_config"):
             from .adapters import SharedBackboneAdapterRouter
-            self.adapter_router = SharedBackboneAdapterRouter(eraser.get_base_model())
+            self.adapter_router = SharedBackboneAdapterRouter.for_backbone(backbone)
 
     def train(self, mode=True):
         super().train(mode)
@@ -185,6 +185,9 @@ class KVEraser(nn.Module):
         cache_len = self._cache_seq_len(old_context_kv)
         if not (0 <= erase_start < erase_end <= cache_len):
             raise ValueError("Erase token span is invalid for the cached sequence length.")
+        if not torch.is_inference_mode_enabled() and any(
+                torch.is_inference(tensor) for pair in old_context_kv for tensor in pair):
+            raise RuntimeError("Erase an inference-mode KV cache inside torch.inference_mode().")
 
         eraser_input_device = self._model_input_device(self.eraser)
         eraser_layers = self._model_layers(self.eraser)
@@ -197,13 +200,16 @@ class KVEraser(nn.Module):
             dtype=torch.long,
             device=eraser_input_device,
         )
-        step = self.eraser(
-            input_ids=needle_ids,
-            attention_mask=attention_mask,
-            past_key_values=prefix_kv,
-            use_cache=True,
-            return_dict=True,
-        )
+        rollback = (restore_span_on_error(old_context_kv, erase_start, erase_end)
+                    if fast_span else nullcontext())
+        with rollback:
+            step = self.eraser(
+                input_ids=needle_ids,
+                attention_mask=attention_mask,
+                past_key_values=prefix_kv,
+                use_cache=True,
+                return_dict=True,
+            )
 
         if fast_span:
             return old_context_kv
