@@ -10,7 +10,7 @@ from transformers import AutoTokenizer
 from kveraser.adapters import BASE_MODEL, BASE_REVISION, DEFAULT_CHECKPOINT_REPO, AdapterCheckpoint
 from kveraser.data import DEFAULT_DATASET_REPO, DatasetSource, erase_cached_prefix, resolve_erase_token_span
 from kveraser.metrics import EVALUATION_SUITE, aggregate_scores, score_prediction
-from kveraser.model import KVEraser
+from kveraser.model import KVEraser, PARTIAL_RECOMPUTE_FRACTION
 from kveraser.runtime import load_evaluation_models, require_cuda, save_json, set_seed, use_local_files_only
 from kveraser.schema import DATASETS
 
@@ -19,7 +19,8 @@ def build_arg_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", default=DEFAULT_CHECKPOINT_REPO, help="HF model ID or local adapter directory.")
     parser.add_argument("--checkpoint_revision", default="main")
-    parser.add_argument("--method", choices=("kveraser", "full-recompute", "discard", "instruction"),
+    parser.add_argument("--method", choices=("kveraser", "full-recompute", "discard", "instruction",
+                                           "partial-erase", "partial-query"),
                         default="kveraser")
     parser.add_argument("--datasets", nargs="+", choices=EVALUATION_SUITE, default=EVALUATION_SUITE)
     parser.add_argument("--data_repo", default=DEFAULT_DATASET_REPO)
@@ -36,13 +37,16 @@ def build_arg_parser():
 @torch.inference_mode()
 def predict(model, sample, method, max_new_tokens):
     query = sample["query_suffix"]
-    if method in ("kveraser", "discard", "instruction"):
+    if method in ("kveraser", "discard", "instruction", "partial-erase", "partial-query"):
         cache, ids, offsets = model.prefill(sample["cached_prompt"])
         if method == "kveraser":
             cache = erase_cached_prefix(model, cache, ids, offsets, sample)
-        elif method == "discard":
+        elif method in ("discard", "partial-erase", "partial-query"):
             start, end = resolve_erase_token_span(offsets, sample)
-            cache = model.discard_span_cache(cache, start, end)
+            if method == "discard":
+                cache = model.discard_span_cache(cache, start, end)
+            else:
+                cache = model.partial_recompute_dropped_cache(cache, ids, start, end, method.removeprefix("partial-"))
         else:
             query = sample["variants"]["prompt_forget_query_suffix"]
     elif method == "full-recompute":
@@ -95,6 +99,8 @@ def main(args):
                   checkpoint_commit=adapter.revision if adapter is not None else None)
     if adapter is None:
         config.update(checkpoint=None, checkpoint_revision=None)
+    if args.method.startswith("partial-"):
+        config["recompute_fraction"] = PARTIAL_RECOMPUTE_FRACTION
     output.mkdir(parents=True, exist_ok=True)
     results = {}
     for dataset in args.datasets:
