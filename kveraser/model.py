@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers.cache_utils import DynamicCache
 
+from .cache import can_write_span, span_write_cache
 from .runtime import effective_model_max_length
 
 
@@ -188,7 +189,9 @@ class KVEraser(nn.Module):
         eraser_input_device = self._model_input_device(self.eraser)
         eraser_layers = self._model_layers(self.eraser)
         needle_ids = needle_ids.to(eraser_input_device)
-        prefix_kv = self._clone_prefix_cache(old_context_kv, erase_start, eraser_layers)
+        fast_span = can_write_span(self, old_context_kv, int(needle_ids.shape[0]))
+        prefix_kv = (span_write_cache(old_context_kv, erase_start, needle_len) if fast_span
+                     else self._clone_prefix_cache(old_context_kv, erase_start, eraser_layers))
         attention_mask = torch.ones(
             (int(needle_ids.shape[0]), erase_end),
             dtype=torch.long,
@@ -202,6 +205,8 @@ class KVEraser(nn.Module):
             return_dict=True,
         )
 
+        if fast_span:
+            return old_context_kv
         for layer_idx in range(len(old_context_kv)):
             old_k, old_v = old_context_kv[layer_idx]
             step_k, step_v = step.past_key_values[layer_idx]
