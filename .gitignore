@@ -1,6 +1,6 @@
 tools/
-tests/*
-!tests/test_schema.py
+tests/
+docs/
 __pycache__/
 **/__pycache__/
 *.py[cod]
