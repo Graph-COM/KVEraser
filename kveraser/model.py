@@ -1,11 +1,26 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
+from functools import wraps
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers.cache_utils import DynamicCache
 
 from .runtime import effective_model_max_length
+
+
+def _adapter_mode(enabled):
+    def decorate(method):
+        @wraps(method)
+        def routed(self, *args, **kwargs):
+            context = (nullcontext() if self.adapter_router is None
+                       else self.adapter_router.use_adapter(enabled))
+            with context:
+                return method(self, *args, **kwargs)
+        return routed
+    return decorate
 
 
 class KVEraser(nn.Module):
@@ -16,6 +31,11 @@ class KVEraser(nn.Module):
         self.eraser = eraser
         self.model_max_len = effective_model_max_length(tokenizer, getattr(generator, "config", None))
         self.stop_token_ids = self._stop_token_ids(generator, tokenizer)
+        self.adapter_router = None
+        if (eraser is not None and hasattr(eraser, "get_base_model")
+                and eraser.get_base_model() is self._base_transformer(generator)):
+            from .adapters import SharedBackboneAdapterRouter
+            self.adapter_router = SharedBackboneAdapterRouter(eraser.get_base_model())
 
     def train(self, mode=True):
         super().train(mode)
@@ -93,6 +113,7 @@ class KVEraser(nn.Module):
             )
         return prefix_cache
 
+    @_adapter_mode(False)
     def prefill(self, cached_prompt):
         enc = self.tokenizer(
             cached_prompt,
@@ -116,6 +137,7 @@ class KVEraser(nn.Module):
         return out.past_key_values, input_ids, enc["offset_mapping"]
 
     @torch.no_grad()
+    @_adapter_mode(False)
     def prime_query(self, old_context_kv, query_suffix):
         input_device = self._model_input_device(self.generator)
         enc = self.tokenizer(
@@ -150,6 +172,7 @@ class KVEraser(nn.Module):
         )
         return last_prompt_token, prompt_seq_len, out.past_key_values
 
+    @_adapter_mode(True)
     def erase_tokens(self, old_context_kv, erase_start, needle_ids):
         if self.eraser is None:
             raise RuntimeError("KVEraser.erase_tokens requires an eraser backbone.")
@@ -192,6 +215,7 @@ class KVEraser(nn.Module):
         return self.erase_tokens(old_context_kv, erase_start, needle_ids)
 
     @torch.no_grad()
+    @_adapter_mode(False)
     def recompute_edited_cached_prompt(self, old_context_kv, cached_input_ids, edited_cached_prompt):
         input_device = self._model_input_device(self.generator)
         generator_layers = self._model_layers(self.generator)
@@ -235,6 +259,7 @@ class KVEraser(nn.Module):
         return out.past_key_values, edited_input_ids
 
     @torch.no_grad()
+    @_adapter_mode(False)
     def decode_with_count(self, last_prompt_token, prompt_seq_len, past_kv, max_new_tokens):
         max_new_tokens = int(max_new_tokens)
         if max_new_tokens <= 0:

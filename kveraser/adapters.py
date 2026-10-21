@@ -1,9 +1,12 @@
 """Qwen3-8B LoRA initialization and local or Hugging Face checkpoints."""
 from copy import deepcopy
+from contextlib import contextmanager
 from pathlib import Path
+from threading import RLock
 
 from huggingface_hub import snapshot_download
 from peft import LoraConfig, get_peft_model, get_peft_model_state_dict, set_peft_model_state_dict
+from peft.tuners.lora.layer import LoraLayer
 from safetensors.torch import load_file, save_file
 from transformers import Qwen3Model
 
@@ -88,3 +91,40 @@ def save_adapter(model, output_dir: str | Path) -> None:
     config = deepcopy(model.peft_config["default"])
     config.inference_mode = True
     config.save_pretrained(output_dir)
+
+
+class SharedBackboneAdapterRouter:
+    """Route frozen inference through resident LoRA or its exact base layers.
+
+    Bindings are cached once. Contexts serialize calls and restore the previous
+    route, including nested calls and exceptions. No weights are copied/merged.
+    Use routed KVEraser methods for inference on the shared backbone.
+    """
+
+    def __init__(self, backbone):
+        if any(parameter.requires_grad for parameter in backbone.parameters()):
+            raise ValueError("Shared adapter routing requires a frozen backbone and adapter.")
+        self._bindings = [(parent, name, child) for parent in backbone.modules()
+                          for name, child in parent.named_children() if isinstance(child, LoraLayer)]
+        if not self._bindings or any(layer.merged or layer.disable_adapters
+                                     for _, _, layer in self._bindings):
+            raise ValueError("Expected enabled, unmerged LoRA layers.")
+        self._enabled = True
+        self._lock = RLock()
+
+    def _switch(self, enabled):
+        for parent, name, layer in self._bindings:
+            parent._modules[name] = layer if enabled else layer.base_layer
+        self._enabled = enabled
+
+    @contextmanager
+    def use_adapter(self, enabled):
+        with self._lock:
+            previous = self._enabled
+            if enabled != previous:
+                self._switch(enabled)
+            try:
+                yield
+            finally:
+                if self._enabled != previous:
+                    self._switch(previous)
