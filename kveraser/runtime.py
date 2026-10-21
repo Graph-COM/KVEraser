@@ -246,6 +246,29 @@ def load_eraser_checkpoint(
     return eraser
 
 
+def load_training_models(
+    *, checkpoint=None, checkpoint_revision="main", placement="single_gpu",
+    cache_dir=None, local_files_only=None,
+):
+    """Load a frozen generator and a separate backbone with a trainable LoRA adapter."""
+    from .adapters import BASE_MODEL, BASE_REVISION, AdapterCheckpoint, initialize_adapter
+
+    require_cuda()
+    if local_files_only is None:
+        local_files_only = use_local_files_only()
+    adapter = None if checkpoint is None else AdapterCheckpoint(
+        checkpoint, revision=checkpoint_revision, cache_dir=cache_dir,
+        local_files_only=local_files_only)
+    kwargs = model_load_kwargs(placement, dtype=torch.bfloat16, attn_backend="sdpa",
+                               local_files_only=local_files_only)
+    kwargs.update(revision=BASE_REVISION, cache_dir=cache_dir)
+    generator = freeze_model(_from_pretrained(AutoModelForCausalLM, BASE_MODEL, **kwargs))
+    backbone = _from_pretrained(AutoModel, BASE_MODEL, **kwargs)
+    eraser = (initialize_adapter(backbone) if adapter is None
+              else adapter.load(backbone, trainable=True))
+    return generator, eraser
+
+
 def parameter_counts(model: Any) -> tuple[int, int]:
     total = sum(param.numel() for param in model.parameters())
     trainable = sum(param.numel() for param in model.parameters() if param.requires_grad)
