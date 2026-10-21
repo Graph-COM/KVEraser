@@ -273,19 +273,21 @@ def load_evaluation_models(
     checkpoint="Graph-COM/KVEraser", *, checkpoint_revision="main", placement="single_gpu",
     cache_dir=None, local_files_only=None,
 ):
-    """Load one frozen BF16 backbone; use through KVEraser for adapter routing."""
+    """Load a frozen BF16 backbone (None omits the adapter); route through KVEraser."""
     from .adapters import BASE_MODEL, BASE_REVISION, AdapterCheckpoint
 
     require_cuda()
     if local_files_only is None:
         local_files_only = use_local_files_only()
-    adapter = AdapterCheckpoint(checkpoint, revision=checkpoint_revision, cache_dir=cache_dir,
-                                local_files_only=local_files_only)
+    adapter = checkpoint
+    if checkpoint is not None and not isinstance(checkpoint, AdapterCheckpoint):
+        adapter = AdapterCheckpoint(checkpoint, revision=checkpoint_revision, cache_dir=cache_dir,
+                                    local_files_only=local_files_only)
     kwargs = model_load_kwargs(placement, dtype=torch.bfloat16, attn_backend="sdpa",
                                local_files_only=local_files_only)
     kwargs.update(revision=BASE_REVISION, cache_dir=cache_dir)
     generator = freeze_model(_from_pretrained(AutoModelForCausalLM, BASE_MODEL, **kwargs))
-    eraser = adapter.load(generator.base_model)
+    eraser = None if adapter is None else adapter.load(generator.base_model)
     return generator, eraser
 
 
