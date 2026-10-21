@@ -17,6 +17,11 @@ class KVEraser(nn.Module):
         self.model_max_len = effective_model_max_length(tokenizer, getattr(generator, "config", None))
         self.stop_token_ids = self._stop_token_ids(generator, tokenizer)
 
+    def train(self, mode=True):
+        super().train(mode)
+        self.generator.eval()
+        return self
+
     @staticmethod
     def _model_input_device(model):
         embeddings = model.get_input_embeddings()
