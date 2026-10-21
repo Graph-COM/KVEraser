@@ -1,4 +1,4 @@
-"""Evaluate Qwen3-8B KVEraser adapters or the full-recompute baseline."""
+"""Evaluate Qwen3-8B KVEraser adapters and context-erasing baselines."""
 import argparse
 import json
 from pathlib import Path
@@ -8,7 +8,7 @@ from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 
 from kveraser.adapters import BASE_MODEL, BASE_REVISION, DEFAULT_CHECKPOINT_REPO, AdapterCheckpoint
-from kveraser.data import DEFAULT_DATASET_REPO, DatasetSource, erase_cached_prefix
+from kveraser.data import DEFAULT_DATASET_REPO, DatasetSource, erase_cached_prefix, resolve_erase_token_span
 from kveraser.metrics import EVALUATION_SUITE, aggregate_scores, score_prediction
 from kveraser.model import KVEraser
 from kveraser.runtime import load_evaluation_models, require_cuda, save_json, set_seed, use_local_files_only
@@ -19,7 +19,8 @@ def build_arg_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", default=DEFAULT_CHECKPOINT_REPO, help="HF model ID or local adapter directory.")
     parser.add_argument("--checkpoint_revision", default="main")
-    parser.add_argument("--method", choices=("kveraser", "full-recompute"), default="kveraser")
+    parser.add_argument("--method", choices=("kveraser", "full-recompute", "discard", "instruction"),
+                        default="kveraser")
     parser.add_argument("--datasets", nargs="+", choices=EVALUATION_SUITE, default=EVALUATION_SUITE)
     parser.add_argument("--data_repo", default=DEFAULT_DATASET_REPO)
     parser.add_argument("--data_revision", default="main")
@@ -34,14 +35,21 @@ def build_arg_parser():
 
 @torch.inference_mode()
 def predict(model, sample, method, max_new_tokens):
-    if method == "kveraser":
+    query = sample["query_suffix"]
+    if method in ("kveraser", "discard", "instruction"):
         cache, ids, offsets = model.prefill(sample["cached_prompt"])
-        cache = erase_cached_prefix(model, cache, ids, offsets, sample)
+        if method == "kveraser":
+            cache = erase_cached_prefix(model, cache, ids, offsets, sample)
+        elif method == "discard":
+            start, end = resolve_erase_token_span(offsets, sample)
+            cache = model.discard_span_cache(cache, start, end)
+        else:
+            query = sample["variants"]["prompt_forget_query_suffix"]
     elif method == "full-recompute":
         cache, _, _ = model.prefill(sample["variants"]["edited_cached_prompt"])
     else:
         raise ValueError(f"Unsupported method: {method}")
-    last, length, cache = model.prime_query(cache, sample["query_suffix"])
+    last, length, cache = model.prime_query(cache, query)
     return model.decode_with_count(last, length, cache, max_new_tokens)
 
 
