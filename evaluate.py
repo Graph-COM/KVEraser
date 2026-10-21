@@ -11,6 +11,7 @@ from kveraser.adapters import BASE_MODEL, BASE_REVISION, DEFAULT_CHECKPOINT_REPO
 from kveraser.data import DEFAULT_DATASET_REPO, DatasetSource, erase_cached_prefix, resolve_erase_token_span
 from kveraser.metrics import EVALUATION_SUITE, aggregate_scores, score_prediction
 from kveraser.model import KVEraser, PARTIAL_RECOMPUTE_FRACTION
+from kveraser.performance import OnlineMeasurement, summarize_performance
 from kveraser.runtime import load_evaluation_models, require_cuda, save_json, set_seed, use_local_files_only
 from kveraser.schema import DATASETS
 
@@ -30,15 +31,21 @@ def build_arg_parser():
     parser.add_argument("--local_files_only", action="store_true")
     parser.add_argument("--placement", choices=("single_gpu", "balanced"), default="single_gpu")
     parser.add_argument("--max_samples", type=int, help="Positive sample limit per dataset.")
+    parser.add_argument("--measure_performance", action="store_true", help="Record online time and CUDA memory.")
+    parser.add_argument("--warmup_samples", type=int, default=3, help="Warmup examples per dataset when measuring.")
     parser.add_argument("--output_dir", default="outputs/evaluation", help="An empty output directory.")
     return parser
 
 
 @torch.inference_mode()
-def predict(model, sample, method, max_new_tokens):
+def predict(model, sample, method, max_new_tokens, measurement=None):
     query = sample["query_suffix"]
+    if measurement is not None:
+        measurement.prepare()
+    cache, ids, offsets = model.prefill(sample["cached_prompt"])
+    if measurement is not None:
+        measurement.start()
     if method in ("kveraser", "discard", "instruction", "partial-erase", "partial-query"):
-        cache, ids, offsets = model.prefill(sample["cached_prompt"])
         if method == "kveraser":
             cache = erase_cached_prefix(model, cache, ids, offsets, sample)
         elif method in ("discard", "partial-erase", "partial-query"):
@@ -50,28 +57,40 @@ def predict(model, sample, method, max_new_tokens):
         else:
             query = sample["variants"]["prompt_forget_query_suffix"]
     elif method == "full-recompute":
-        cache, _, _ = model.prefill(sample["variants"]["edited_cached_prompt"])
+        cache, _ = model.recompute_edited_cached_prompt(
+            cache, ids, sample["variants"]["edited_cached_prompt"], consume_cache=True)
     else:
         raise ValueError(f"Unsupported method: {method}")
     last, length, cache = model.prime_query(cache, query)
-    return model.decode_with_count(last, length, cache, max_new_tokens)
+    result = model.decode_with_count(last, length, cache, max_new_tokens)
+    if measurement is not None:
+        measurement.stop()
+    return result
 
 
-def evaluate_dataset(model, dataset, samples, method, output_dir):
+def evaluate_dataset(model, dataset, samples, method, output_dir, measurement=None, warmup_samples=3):
     records = []
+    if measurement is not None:
+        for sample in samples[:warmup_samples]:
+            predict(model, sample, method, DATASETS[dataset].tokens_to_generate, measurement)
     path = output_dir / f"{dataset.replace('/', '__')}.jsonl"
     with path.open("x", encoding="utf-8", buffering=1) as stream:
         for sample in tqdm(samples, desc=dataset, unit="sample"):
-            text, count = predict(model, sample, method, DATASETS[dataset].tokens_to_generate)
+            text, count = predict(model, sample, method, DATASETS[dataset].tokens_to_generate, measurement)
             record = dict(id=sample["id"], dataset=dataset, generated_text=text, generated_tokens=count,
                           **score_prediction(dataset, text, sample))
+            if measurement is not None:
+                record.update(measurement.stats)
             stream.write(json.dumps(record, ensure_ascii=False) + "\n")
             records.append(record)
+    performance = summarize_performance(records) if measurement is not None else {}
     return dict(aggregate_scores(records), tokens_to_generate=DATASETS[dataset].tokens_to_generate,
-                predictions=path.name)
+                predictions=path.name, **performance)
 
 
 def main(args):
+    if args.warmup_samples < 0:
+        raise ValueError("--warmup_samples must be nonnegative.")
     if args.max_samples is not None and args.max_samples <= 0:
         raise ValueError("--max_samples must be positive.")
     if len(args.datasets) != len(set(args.datasets)):
@@ -93,6 +112,7 @@ def main(args):
     generator, eraser = load_evaluation_models(adapter, placement=args.placement,
                                               cache_dir=args.cache_dir, local_files_only=offline)
     model = KVEraser(tokenizer, generator, eraser).eval()
+    measurement = OnlineMeasurement(generator) if args.measure_performance else None
     config = dict(vars(args), seed=42, base_model=BASE_MODEL, base_revision=BASE_REVISION,
                   tokenizer_revision=BASE_REVISION, dtype="bf16", attn_backend="sdpa",
                   local_files_only=offline, data_commit=source.revision,
@@ -101,13 +121,15 @@ def main(args):
         config.update(checkpoint=None, checkpoint_revision=None)
     if args.method.startswith("partial-"):
         config["recompute_fraction"] = PARTIAL_RECOMPUTE_FRACTION
+    if measurement is not None:
+        config["performance_environment"] = measurement.environment()
     output.mkdir(parents=True, exist_ok=True)
     results = {}
     for dataset in args.datasets:
         samples = source.load(dataset, "test")
         if args.max_samples is not None:
             samples = samples[:args.max_samples]
-        results[dataset] = evaluate_dataset(model, dataset, samples, args.method, output)
+        results[dataset] = evaluate_dataset(model, dataset, samples, args.method, output, measurement, args.warmup_samples)
         print(json.dumps({"dataset": dataset, **results[dataset]}), flush=True)
     summary = {"config": config, "results": results}
     save_json(str(output / "summary.json"), summary)

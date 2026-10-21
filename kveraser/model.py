@@ -7,7 +7,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers.cache_utils import DynamicCache
+from transformers.cache_utils import Cache, DynamicCache, DynamicLayer
 
 from .cache import can_write_span, discard_span, restore_span_on_error, span_write_cache
 from .runtime import effective_model_max_length
@@ -271,9 +271,21 @@ class KVEraser(nn.Module):
 
     @torch.no_grad()
     @_adapter_mode(False)
-    def recompute_edited_cached_prompt(self, old_context_kv, cached_input_ids, edited_cached_prompt):
+    def recompute_edited_cached_prompt(self, old_context_kv, cached_input_ids, edited_cached_prompt, *, consume_cache=False):
+        """Reuse identical prefix tokens and recompute the suffix; optionally consume the input cache."""
         input_device = self._model_input_device(self.generator)
         generator_layers = self._model_layers(self.generator)
+        if consume_cache:
+            if (type(old_context_kv) not in (Cache, DynamicCache) or old_context_kv.offloading
+                    or len(old_context_kv.layers) != len(generator_layers)):
+                raise ValueError("Consuming recompute requires a native, non-offloaded dynamic cache.")
+            length = self._cache_seq_len(old_context_kv)
+            if (cached_input_ids.shape != (1, length) or any(
+                    type(layer) is not DynamicLayer or not layer.is_initialized
+                    or layer.keys.ndim != 4 or layer.keys.shape != layer.values.shape
+                    or layer.keys.shape[0] != 1 or layer.keys.shape[2] != length
+                    for layer in old_context_kv.layers)):
+                raise ValueError("Consuming recompute requires one sequence with matching token and cache lengths.")
         enc = self.tokenizer(
             edited_cached_prompt,
             add_special_tokens=False,
@@ -286,6 +298,21 @@ class KVEraser(nn.Module):
             raise ValueError("edited_cached_prompt tokenized to an empty sequence.")
 
         shared_prefix_len = self._shared_prefix_len(cached_input_ids, edited_input_ids)
+        if consume_cache:
+            if shared_prefix_len:
+                old_context_kv.crop(shared_prefix_len)
+                if shared_prefix_len == int(edited_input_ids.shape[1]):
+                    return old_context_kv, edited_input_ids
+                prefix_kv = old_context_kv
+            else:
+                old_context_kv.layers.clear()
+                prefix_kv = None
+            out = self._base_transformer(self.generator)(
+                input_ids=edited_input_ids[:, shared_prefix_len:],
+                attention_mask=torch.ones_like(edited_input_ids),
+                past_key_values=prefix_kv, use_cache=True, return_dict=True,
+            )
+            return out.past_key_values, edited_input_ids
         if shared_prefix_len == int(edited_input_ids.shape[1]):
             return self._clone_prefix_cache(old_context_kv, shared_prefix_len, generator_layers), edited_input_ids
 
