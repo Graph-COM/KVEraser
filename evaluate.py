@@ -5,14 +5,13 @@ from pathlib import Path
 
 import torch
 from tqdm.auto import tqdm
-from transformers import AutoTokenizer
 
 from kveraser.adapters import BASE_MODEL, BASE_REVISION, DEFAULT_CHECKPOINT_REPO, AdapterCheckpoint
 from kveraser.data import DEFAULT_DATASET_REPO, DatasetSource, erase_cached_prefix, resolve_erase_token_span
 from kveraser.metrics import EVALUATION_SUITE, aggregate_scores, score_prediction
 from kveraser.model import KVEraser, PARTIAL_RECOMPUTE_FRACTION
 from kveraser.performance import OnlineMeasurement, summarize_performance
-from kveraser.runtime import load_evaluation_models, require_cuda, save_json, set_seed, use_local_files_only
+from kveraser.runtime import load_evaluation_models, load_tokenizer, require_cuda, save_json, set_seed, use_local_files_only
 from kveraser.schema import DATASETS
 
 
@@ -107,8 +106,8 @@ def main(args):
     if args.method == "kveraser":
         adapter = AdapterCheckpoint(args.checkpoint, revision=args.checkpoint_revision,
                                     cache_dir=args.cache_dir, local_files_only=offline)
-    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL, revision=BASE_REVISION,
-                                             cache_dir=args.cache_dir, local_files_only=offline)
+    tokenizer = load_tokenizer(BASE_MODEL, revision=BASE_REVISION,
+                               cache_dir=args.cache_dir, local_files_only=offline)
     generator, eraser = load_evaluation_models(adapter, placement=args.placement,
                                               cache_dir=args.cache_dir, local_files_only=offline)
     model = KVEraser(tokenizer, generator, eraser).eval()

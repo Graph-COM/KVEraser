@@ -5,10 +5,12 @@ import json
 import os
 import random
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
+from huggingface_hub import snapshot_download
 from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
 
 
@@ -162,11 +164,21 @@ def model_load_kwargs(
     }
 
 
-def load_tokenizer(model_name_or_path: str, *, local_files_only: bool | None = None) -> Any:
+def load_tokenizer(model_name_or_path: str, *, local_files_only: bool | None = None,
+                   revision: str | None = None, cache_dir: str | None = None) -> Any:
     if local_files_only is None:
         local_files_only = use_local_files_only()
+    local_path = Path(model_name_or_path).expanduser()
+    if local_path.is_dir():
+        model_name_or_path = str(local_path)
+    elif local_files_only:
+        # A local snapshot also prevents tokenizer-specific Hub metadata lookups.
+        model_name_or_path = snapshot_download(model_name_or_path, revision=revision,
+                                               cache_dir=cache_dir, local_files_only=True)
     return AutoTokenizer.from_pretrained(
         model_name_or_path,
+        revision=revision,
+        cache_dir=cache_dir,
         trust_remote_code=True,
         local_files_only=local_files_only,
     )
