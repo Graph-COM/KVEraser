@@ -268,9 +268,10 @@ def load_training_models(
     require_cuda()
     if local_files_only is None:
         local_files_only = use_local_files_only()
-    adapter = None if checkpoint is None else AdapterCheckpoint(
-        checkpoint, revision=checkpoint_revision, cache_dir=cache_dir,
-        local_files_only=local_files_only)
+    adapter = checkpoint
+    if checkpoint is not None and not isinstance(checkpoint, AdapterCheckpoint):
+        adapter = AdapterCheckpoint(checkpoint, revision=checkpoint_revision, cache_dir=cache_dir,
+                                    local_files_only=local_files_only)
     kwargs = model_load_kwargs(placement, dtype=torch.bfloat16, attn_backend="sdpa",
                                local_files_only=local_files_only)
     kwargs.update(revision=BASE_REVISION, cache_dir=cache_dir)
