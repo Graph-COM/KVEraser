@@ -51,9 +51,8 @@ def parse_tool_name(text: str, candidates: list[str]) -> str | None:
                         key=len, reverse=True)
     if not text or not candidates:
         return None
-    cleaned = text.strip("`").strip()
-    cleaned = re.sub(r"^```(?:json|text)?\s*", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+    cleaned = re.sub(r"^```(?:json|text)?\s*", "", text, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*```$", "", cleaned).strip("`").strip()
     try:
         value = json.loads(cleaned)
     except ValueError:
