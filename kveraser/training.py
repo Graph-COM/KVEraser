@@ -1,13 +1,17 @@
 """Shared teacher-forced training for pretraining and task-specific LoRA adapters."""
+import argparse
 from dataclasses import dataclass
+import json
+from pathlib import Path
 import math
 
 import torch
 from tqdm.auto import tqdm
 
-from .data import erase_cached_prefix, target_text
+from .adapters import save_adapter
+from .data import DEFAULT_DATASET_REPO, erase_cached_prefix, target_text
 from .model import answer_loss
-from .runtime import DisabledWandbRun
+from .runtime import DisabledWandbRun, save_json, setup_wandb
 
 
 @dataclass(frozen=True)
@@ -86,3 +90,54 @@ def train_epoch(model, samples, optimizer, config: TrainingConfig, *,
         del loss
     return dict(loss=loss_sum / len(samples), samples=len(samples), optimizer_steps=optimizer_steps,
                 global_step=global_step + len(samples))
+
+
+def build_training_parser(description, *, grad_accum_steps=8, output_dir="checkpoints/pretrain"):
+    parser = argparse.ArgumentParser(description=description)
+    parser.add_argument("--data_repo", default=DEFAULT_DATASET_REPO)
+    parser.add_argument("--data_revision", default="main")
+    parser.add_argument("--data_root", help="Local directory containing qwen3_8b/v1/manifest.json.")
+    parser.add_argument("--cache_dir")
+    parser.add_argument("--local_files_only", action="store_true")
+    parser.add_argument("--placement", choices=("single_gpu", "balanced"), default="single_gpu")
+    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--lr", type=float, default=1e-5)
+    parser.add_argument("--weight_decay", type=float, default=0.01)
+    parser.add_argument("--max_grad_norm", type=float, default=1.0)
+    parser.add_argument("--grad_accum_steps", type=int, default=grad_accum_steps)
+    parser.add_argument("--max_samples", type=int, help="Limit each epoch to this many samples after shuffling.")
+    parser.add_argument("--max_validation_samples", type=int, help="Limit final validation to this many samples.")
+    parser.add_argument("--wandb_mode", choices=("disabled", "online", "offline"), default="disabled")
+    parser.add_argument("--wandb_project", default="kv-eraser")
+    parser.add_argument("--wandb_name")
+    parser.add_argument("--output_dir", default=output_dir, help="An empty output directory.")
+    return parser
+
+
+def run_training(model, samples, validation, training, config, epoch_sample_order):
+    """Train from the supplied adapter with a fresh optimizer, then save and validate."""
+    output = Path(config["output_dir"])
+    optimizer = create_optimizer(model, training)
+    save_json(str(output / "run_config.json"), config)
+    run = setup_wandb(project=config["wandb_project"], mode=config["wandb_mode"], run_name=config["wandb_name"], config=config)
+    epochs, global_step = [], 0
+    try:
+        for epoch in range(1, config["epochs"] + 1):
+            order = epoch_sample_order(len(samples), seed=config["seed"], epoch=epoch)[:config["max_samples"]]
+            metrics = train_epoch(model, [samples[i] for i in order], optimizer, training,
+                                  wandb_run=run, epoch=epoch, global_step=global_step)
+            epochs.append(dict(epoch=epoch, **metrics))
+            global_step = metrics["global_step"]
+        save_adapter(model.eraser, output)
+        model.eval()
+        with torch.no_grad():
+            losses = [float(sample_loss(model, sample)) for sample in tqdm(validation, desc="Validation", unit="sample")]
+        validation_loss = sum(losses) / len(losses)
+        run.log({"validation/loss": validation_loss, "validation/samples": len(validation)}, step=global_step + 1)
+        summary = dict(epochs=epochs, validation_loss=validation_loss, validation_samples=len(validation))
+        save_json(str(output / "metrics.json"), summary)
+        print(json.dumps(summary), flush=True)
+        return summary
+    finally:
+        run.finish()
