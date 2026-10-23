@@ -13,7 +13,6 @@ from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
 
 
 SUPPORTED_PLACEMENTS = ("single_gpu", "balanced")
-SUPPORTED_ATTN_BACKENDS = ("sdpa", "flash_attention_2")
 
 
 def use_local_files_only() -> bool:
@@ -71,13 +70,6 @@ def effective_model_max_length(tokenizer: Any, model_config: Any = None) -> int 
     return min(candidates) if candidates else None
 
 
-def validate_attn_backend(attn_backend: str, dtype: torch.dtype) -> None:
-    if attn_backend not in SUPPORTED_ATTN_BACKENDS:
-        raise ValueError(f"--attn_backend must be one of: {', '.join(SUPPORTED_ATTN_BACKENDS)}.")
-    if attn_backend == "flash_attention_2" and dtype not in {torch.float16, torch.bfloat16}:
-        raise RuntimeError("flash_attention_2 requires fp16 or bf16 weights.")
-
-
 def resolve_device_map(placement: str) -> dict[str, int] | str:
     if placement not in SUPPORTED_PLACEMENTS:
         raise ValueError(f"--placement must be one of: {', '.join(SUPPORTED_PLACEMENTS)}.")
@@ -92,33 +84,19 @@ def resolve_device_map(placement: str) -> dict[str, int] | str:
     return "balanced"
 
 
-def _from_pretrained(model_cls: Any, model_name_or_path: str, **kwargs: Any) -> Any:
-    try:
-        return model_cls.from_pretrained(model_name_or_path, **kwargs)
-    except TypeError as exc:
-        if "unexpected keyword argument 'dtype'" not in str(exc):
-            raise
-        kwargs["torch_dtype"] = kwargs.pop("dtype")
-        return model_cls.from_pretrained(model_name_or_path, **kwargs)
-
-
 def model_load_kwargs(
     placement: str,
     *,
-    dtype: torch.dtype,
-    attn_backend: str,
     local_files_only: bool,
-    use_safetensors: bool = True,
 ) -> dict[str, Any]:
-    validate_attn_backend(attn_backend, dtype)
     return {
-        "attn_implementation": attn_backend,
-        "dtype": dtype,
+        "attn_implementation": "sdpa",
+        "dtype": torch.bfloat16,
         "trust_remote_code": True,
         "device_map": resolve_device_map(placement),
         "local_files_only": local_files_only,
         "low_cpu_mem_usage": True,
-        "use_safetensors": use_safetensors,
+        "use_safetensors": True,
     }
 
 
@@ -163,11 +141,10 @@ def load_training_models(
     if checkpoint is not None and not isinstance(checkpoint, AdapterCheckpoint):
         adapter = AdapterCheckpoint(checkpoint, revision=checkpoint_revision, cache_dir=cache_dir,
                                     local_files_only=local_files_only)
-    kwargs = model_load_kwargs(placement, dtype=torch.bfloat16, attn_backend="sdpa",
-                               local_files_only=local_files_only)
+    kwargs = model_load_kwargs(placement, local_files_only=local_files_only)
     kwargs.update(revision=BASE_REVISION, cache_dir=cache_dir)
-    generator = freeze_model(_from_pretrained(AutoModelForCausalLM, BASE_MODEL, **kwargs))
-    backbone = _from_pretrained(AutoModel, BASE_MODEL, **kwargs)
+    generator = freeze_model(AutoModelForCausalLM.from_pretrained(BASE_MODEL, **kwargs))
+    backbone = AutoModel.from_pretrained(BASE_MODEL, **kwargs)
     eraser = (initialize_adapter(backbone) if adapter is None
               else adapter.load(backbone, trainable=True))
     return generator, eraser
@@ -187,10 +164,9 @@ def load_evaluation_models(
     if checkpoint is not None and not isinstance(checkpoint, AdapterCheckpoint):
         adapter = AdapterCheckpoint(checkpoint, revision=checkpoint_revision, cache_dir=cache_dir,
                                     local_files_only=local_files_only)
-    kwargs = model_load_kwargs(placement, dtype=torch.bfloat16, attn_backend="sdpa",
-                               local_files_only=local_files_only)
+    kwargs = model_load_kwargs(placement, local_files_only=local_files_only)
     kwargs.update(revision=BASE_REVISION, cache_dir=cache_dir)
-    generator = freeze_model(_from_pretrained(AutoModelForCausalLM, BASE_MODEL, **kwargs))
+    generator = freeze_model(AutoModelForCausalLM.from_pretrained(BASE_MODEL, **kwargs))
     eraser = None if adapter is None else adapter.load(generator.base_model)
     return generator, eraser
 

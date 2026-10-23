@@ -13,10 +13,7 @@ from .schema import (
     DATA_PREFIX, DATASETS, data_path, parquet_schema, validate_record,
 )
 
-TOKENS_TO_GENERATE = 32
 DEFAULT_DATASET_REPO = "Graph-COM/KVEraser"
-PROMPT_FORMAT = "qwen3_nonthinking_delayed_query_prompt_span"
-DATASET_SEED = 42
 
 
 class DatasetSource:
@@ -100,160 +97,12 @@ class DatasetSource:
         return rows
 
 
-def normalize_split_name(name: str) -> str:
-    normalized = str(name).strip().lower()
-    if normalized == "val":
-        return "validation"
-    if normalized not in {"train", "validation", "test"}:
-        raise ValueError("split must be one of train, validation, val, test.")
-    return normalized
-
-
 def _list_value(value: Any) -> list[str]:
     if value is None:
         return []
     if isinstance(value, str):
         return [value]
     return [str(item) for item in list(value)]
-
-
-def remove_prompt_char_span(prompt_text: str, prompt_char_span: list[int], *, span_text: str | None = None) -> str:
-    start_char, end_char = [int(value) for value in prompt_char_span]
-    if start_char < 0 or end_char <= start_char or end_char > len(prompt_text):
-        raise ValueError("Invalid cached-prompt erase character span.")
-    if span_text is not None and prompt_text[start_char:end_char] != span_text:
-        raise ValueError("Erase span text does not match cached prompt.")
-    return prompt_text[:start_char] + prompt_text[end_char:]
-
-
-def sample_to_row(
-    sample: dict[str, Any],
-    *,
-    context_tokens: int,
-    split: str,
-    source_id: str | None = None,
-    seed: int = DATASET_SEED,
-) -> dict[str, Any]:
-    split = normalize_split_name(split)
-    erase_span = sample["erase_span"]
-    targets = sample["targets"]
-    prompt_char_span = [int(x) for x in erase_span["cached_prompt_char_span"]]
-    edited_cached_prompt = sample.get("variants", {}).get("edited_cached_prompt")
-    if edited_cached_prompt is None:
-        edited_cached_prompt = remove_prompt_char_span(
-            sample["cached_prompt"],
-            prompt_char_span,
-            span_text=erase_span["text"],
-        )
-    erased_answers = _list_value(targets["erased_answers"])
-    original_answers = _list_value(targets["original_answers"])
-    return {
-        "id": str(sample["id"]),
-        "source_id": str(source_id if source_id is not None else sample.get("source_id", sample["id"])),
-        "split": split,
-        "context_tokens": int(context_tokens),
-        "tokens_to_generate": int(sample.get("tokens_to_generate", TOKENS_TO_GENERATE)),
-        "seed": int(seed),
-        "prompt_format": str(sample.get("prompt_format", PROMPT_FORMAT)),
-        "query": str(sample.get("query", "")),
-        "cached_prompt": str(sample["cached_prompt"]),
-        "query_suffix": str(sample["query_suffix"]),
-        "erase_span_text": str(erase_span["text"]),
-        "erase_span_start": int(prompt_char_span[0]),
-        "erase_span_end": int(prompt_char_span[1]),
-        "original_answers": original_answers,
-        "erased_answers": erased_answers,
-        "erased_train_text": str(targets.get("erased_train_text", erased_answers[0])),
-        "edited_cached_prompt": edited_cached_prompt,
-    }
-
-
-def row_to_sample(row: dict[str, Any]) -> dict[str, Any]:
-    if "erase_span" in row and "targets" in row:
-        return dict(row)
-    erase_span = {
-        "text": str(row["erase_span_text"]),
-        "cached_prompt_char_span": [int(row["erase_span_start"]), int(row["erase_span_end"])],
-    }
-    original_answers = _list_value(row["original_answers"])
-    erased_answers = _list_value(row["erased_answers"])
-    sample = {
-        "id": str(row["id"]),
-        "source_id": str(row.get("source_id", row["id"])),
-        "split": normalize_split_name(str(row.get("split", "test"))),
-        "context_tokens": int(row.get("context_tokens", 0) or 0),
-        "tokens_to_generate": int(row.get("tokens_to_generate", TOKENS_TO_GENERATE)),
-        "prompt_format": str(row.get("prompt_format", PROMPT_FORMAT)),
-        "query": str(row.get("query", "")),
-        "cached_prompt": str(row["cached_prompt"]),
-        "query_suffix": str(row["query_suffix"]),
-        "erase_span": erase_span,
-        "targets": {
-            "original_answers": original_answers,
-            "erased_answers": erased_answers,
-            "erased_train_text": str(row.get("erased_train_text", erased_answers[0] if erased_answers else "")),
-        },
-        "variants": {
-            "edited_cached_prompt": str(row.get("edited_cached_prompt") or remove_prompt_char_span(
-                str(row["cached_prompt"]),
-                erase_span["cached_prompt_char_span"],
-                span_text=erase_span["text"],
-            )),
-        },
-    }
-    validate_sample(sample)
-    return sample
-
-
-def validate_sample(sample: dict[str, Any]) -> None:
-    for key in ("id", "cached_prompt", "query_suffix", "erase_span", "targets"):
-        if key not in sample:
-            raise ValueError(f"Sample is missing required key '{key}'.")
-    if not sample["cached_prompt"]:
-        raise ValueError("cached_prompt must be non-empty.")
-    if not sample["query_suffix"]:
-        raise ValueError("query_suffix must be non-empty.")
-    erase_span = sample["erase_span"]
-    span = erase_span.get("cached_prompt_char_span")
-    text = erase_span.get("text")
-    if not isinstance(span, list) or len(span) != 2:
-        raise ValueError("erase_span.cached_prompt_char_span must be a two-element list.")
-    start_char, end_char = [int(x) for x in span]
-    if sample["cached_prompt"][start_char:end_char] != text:
-        raise ValueError(f"Erase span mismatch in sample {sample['id']}.")
-    targets = sample["targets"]
-    if not _list_value(targets.get("original_answers")):
-        raise ValueError("targets.original_answers must be non-empty.")
-    if not _list_value(targets.get("erased_answers")):
-        raise ValueError("targets.erased_answers must be non-empty.")
-    if not targets.get("erased_train_text"):
-        raise ValueError("targets.erased_train_text must be non-empty.")
-
-
-def schema_features() -> Any:
-    from datasets import Features, Sequence, Value
-
-    return Features(
-        {
-            "id": Value("string"),
-            "source_id": Value("string"),
-            "split": Value("string"),
-            "context_tokens": Value("int32"),
-            "tokens_to_generate": Value("int32"),
-            "seed": Value("int32"),
-            "prompt_format": Value("string"),
-            "query": Value("string"),
-            "cached_prompt": Value("string"),
-            "query_suffix": Value("string"),
-            "erase_span_text": Value("string"),
-            "erase_span_start": Value("int32"),
-            "erase_span_end": Value("int32"),
-            "original_answers": Sequence(Value("string")),
-            "erased_answers": Sequence(Value("string")),
-            "erased_train_text": Value("string"),
-            "edited_cached_prompt": Value("string"),
-        }
-    )
 
 
 def _span_to_token_range(offsets: list[tuple[int, int]], start_char: int, end_char: int) -> tuple[int, int]:
