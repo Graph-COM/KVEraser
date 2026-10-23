@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import random
 import re
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -12,18 +10,13 @@ import pyarrow.parquet as pq
 from huggingface_hub import hf_hub_download, snapshot_download
 
 from .schema import (
-    CONTEXT_SIZES, DATA_PREFIX, DATASETS, data_path, parquet_schema, validate_record,
+    DATA_PREFIX, DATASETS, data_path, parquet_schema, validate_record,
 )
 
 TOKENS_TO_GENERATE = 32
-TRAIN_ROWS_PER_CONTEXT = 200
-VALIDATION_ROWS_PER_CONTEXT = 100
-TEST_ROWS_PER_CONTEXT = 100
 DEFAULT_DATASET_REPO = "Graph-COM/KVEraser"
 PROMPT_FORMAT = "qwen3_nonthinking_delayed_query_prompt_span"
 DATASET_SEED = 42
-RELEASE_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_LOCAL_DATA_ROOT = RELEASE_ROOT / "data"
 
 
 class DatasetSource:
@@ -105,35 +98,6 @@ class DatasetSource:
                         seen.add(row["id"])
                         rows.append(row)
         return rows
-
-
-@dataclass(frozen=True)
-class ContextSplits:
-    context_tokens: int
-    train: list[dict[str, Any]]
-    validation: list[dict[str, Any]]
-    test: list[dict[str, Any]]
-    tokens_to_generate: int = TOKENS_TO_GENERATE
-
-
-def config_name(context_tokens: int, tokens_to_generate: int = TOKENS_TO_GENERATE) -> str:
-    return f"niah_ctx{int(context_tokens)}_t{int(tokens_to_generate)}"
-
-
-def context_dir_name(context_tokens: int, tokens_to_generate: int = TOKENS_TO_GENERATE) -> str:
-    return f"ctx{int(context_tokens)}_t{int(tokens_to_generate)}"
-
-
-def parse_contexts(value: str | None) -> tuple[int, ...]:
-    if value is None or str(value).strip().lower() in {"", "all"}:
-        return CONTEXT_SIZES
-    contexts = tuple(int(part.strip()) for part in str(value).split(",") if part.strip())
-    unknown = [ctx for ctx in contexts if ctx not in CONTEXT_SIZES]
-    if unknown:
-        raise ValueError(f"Unsupported context size(s): {unknown}. Expected one of {CONTEXT_SIZES}.")
-    if len(set(contexts)) != len(contexts):
-        raise ValueError("--contexts contains duplicate values.")
-    return contexts
 
 
 def normalize_split_name(name: str) -> str:
@@ -368,105 +332,3 @@ def score_erased_prediction(prediction: list[str], sample: dict[str, Any]) -> bo
 def target_text(sample: dict[str, Any], tokenizer: Any) -> str:
     eos_token = tokenizer.eos_token or ""
     return str(sample["targets"]["erased_train_text"]) + eos_token
-
-
-def _local_data_files(context_tokens: int, data_root: Path | None = None) -> dict[str, str] | None:
-    if data_root is None:
-        data_root = DEFAULT_LOCAL_DATA_ROOT
-
-    context_dir = data_root / "niah" / context_dir_name(context_tokens)
-    data_files: dict[str, str] = {}
-    for split in ("train", "validation", "test"):
-        filename = f"{split}-00000-of-00001.parquet"
-        data_files[split] = str(context_dir / filename)
-    if not all(Path(path).exists() for path in data_files.values()):
-        return None
-    return data_files
-
-
-def load_context_splits(
-    *,
-    context_tokens: int,
-) -> ContextSplits:
-    from datasets import load_dataset
-
-    local_data_files = _local_data_files(context_tokens)
-    if local_data_files is not None:
-        dataset_dict = load_dataset(
-            "parquet",
-            data_files=local_data_files,
-        )
-    else:
-        cfg = config_name(context_tokens)
-        try:
-            dataset_dict = load_dataset(DEFAULT_DATASET_REPO, cfg)
-        except Exception:
-            data_files = {
-                split: f"niah/{context_dir_name(context_tokens)}/{split}-00000-of-00001.parquet"
-                for split in ("train", "validation", "test")
-            }
-            dataset_dict = load_dataset(DEFAULT_DATASET_REPO, data_files=data_files)
-    splits = {
-        split: [row_to_sample(row) for row in dataset_dict[split]]
-        for split in ("train", "validation", "test")
-    }
-    return ContextSplits(
-        context_tokens=int(context_tokens),
-        train=splits["train"],
-        validation=splits["validation"],
-        test=splits["test"],
-    )
-
-
-def load_all_context_splits(
-    *,
-    contexts: tuple[int, ...] = CONTEXT_SIZES,
-) -> dict[int, ContextSplits]:
-    return {
-        int(ctx): load_context_splits(
-            context_tokens=int(ctx),
-        )
-        for ctx in contexts
-    }
-
-
-def validate_split_counts(context_splits: ContextSplits) -> None:
-    expected = {
-        "train": TRAIN_ROWS_PER_CONTEXT,
-        "validation": VALIDATION_ROWS_PER_CONTEXT,
-        "test": TEST_ROWS_PER_CONTEXT,
-    }
-    actual = {
-        "train": len(context_splits.train),
-        "validation": len(context_splits.validation),
-        "test": len(context_splits.test),
-    }
-    for split, expected_count in expected.items():
-        if actual[split] != expected_count:
-            raise ValueError(
-                f"context={context_splits.context_tokens} split={split} has "
-                f"{actual[split]} rows; expected {expected_count}."
-            )
-    split_ids = {
-        "train": {sample["id"] for sample in context_splits.train},
-        "validation": {sample["id"] for sample in context_splits.validation},
-        "test": {sample["id"] for sample in context_splits.test},
-    }
-    if split_ids["train"] & split_ids["validation"] or split_ids["train"] & split_ids["test"] or split_ids["validation"] & split_ids["test"]:
-        raise ValueError(f"Split ID leakage detected for context={context_splits.context_tokens}.")
-
-
-def build_joint_train_sweep(
-    splits_by_context: dict[int, ContextSplits],
-    *,
-    seed: int,
-) -> list[dict[str, Any]]:
-    train_samples: list[dict[str, Any]] = []
-    for ctx in sorted(splits_by_context):
-        for sample in splits_by_context[ctx].train:
-            tagged = dict(sample)
-            tagged["_context_tokens"] = int(ctx)
-            train_samples.append(tagged)
-    rng = random.Random(int(seed))
-    rng.shuffle(train_samples)
-    return train_samples

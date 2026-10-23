@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import gc
 import json
 import os
 import random
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -16,10 +14,6 @@ from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
 
 SUPPORTED_PLACEMENTS = ("single_gpu", "balanced")
 SUPPORTED_ATTN_BACKENDS = ("sdpa", "flash_attention_2")
-
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def use_local_files_only() -> bool:
@@ -43,42 +37,6 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
-
-
-def cleanup_cuda() -> None:
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        try:
-            torch.cuda.ipc_collect()
-        except Exception:
-            pass
-
-
-def sync_for_timing() -> None:
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-
-
-def dtype_from_name(name: str) -> torch.dtype:
-    normalized = str(name).strip().lower()
-    if normalized in {"bf16", "bfloat16", "torch.bfloat16"}:
-        return torch.bfloat16
-    if normalized in {"fp16", "float16", "torch.float16"}:
-        return torch.float16
-    if normalized in {"fp32", "float32", "torch.float32"}:
-        return torch.float32
-    raise ValueError("--dtype must be one of: bf16, fp16, fp32.")
-
-
-def dtype_name(dtype: torch.dtype) -> str:
-    if dtype is torch.bfloat16:
-        return "bf16"
-    if dtype is torch.float16:
-        return "fp16"
-    if dtype is torch.float32:
-        return "fp32"
-    return str(dtype).replace("torch.", "")
 
 
 def _native_qwen3_max_length(model_config: Any) -> int | None:
@@ -191,73 +149,6 @@ def freeze_model(model: Any) -> Any:
     return model
 
 
-def load_generator_model(
-    model_name_or_path: str,
-    *,
-    placement: str,
-    dtype: torch.dtype,
-    attn_backend: str,
-    local_files_only: bool | None = None,
-) -> Any:
-    require_cuda()
-    if local_files_only is None:
-        local_files_only = use_local_files_only()
-    return freeze_model(
-        _from_pretrained(
-            AutoModelForCausalLM,
-            model_name_or_path,
-            **model_load_kwargs(
-                placement,
-                dtype=dtype,
-                attn_backend=attn_backend,
-                local_files_only=local_files_only,
-            ),
-        )
-    )
-
-
-def load_eraser_backbone(
-    model_name_or_path: str,
-    *,
-    placement: str,
-    dtype: torch.dtype,
-    attn_backend: str,
-    local_files_only: bool | None = None,
-) -> Any:
-    require_cuda()
-    if local_files_only is None:
-        local_files_only = use_local_files_only()
-    return _from_pretrained(
-        AutoModel,
-        model_name_or_path,
-        **model_load_kwargs(
-            placement,
-            dtype=dtype,
-            attn_backend=attn_backend,
-            local_files_only=local_files_only,
-        ),
-    )
-
-
-def load_eraser_checkpoint(
-    checkpoint_dir: str,
-    *,
-    placement: str,
-    dtype: torch.dtype,
-    attn_backend: str,
-    local_files_only: bool | None = None,
-) -> Any:
-    eraser = load_eraser_backbone(
-        checkpoint_dir,
-        placement=placement,
-        dtype=dtype,
-        attn_backend=attn_backend,
-        local_files_only=local_files_only,
-    )
-    eraser.eval()
-    return eraser
-
-
 def load_training_models(
     *, checkpoint=None, checkpoint_revision="main", placement="single_gpu",
     cache_dir=None, local_files_only=None,
@@ -304,12 +195,6 @@ def load_evaluation_models(
     return generator, eraser
 
 
-def parameter_counts(model: Any) -> tuple[int, int]:
-    total = sum(param.numel() for param in model.parameters())
-    trainable = sum(param.numel() for param in model.parameters() if param.requires_grad)
-    return int(trainable), int(total)
-
-
 def save_json(path: str, payload: Any) -> None:
     parent = os.path.dirname(os.path.abspath(path))
     if parent:
@@ -317,78 +202,6 @@ def save_json(path: str, payload: Any) -> None:
     with open(path, "w", encoding="utf-8") as fout:
         json.dump(payload, fout, indent=2, sort_keys=True)
         fout.write("\n")
-
-
-def load_json(path: str) -> Any:
-    with open(path, "r", encoding="utf-8") as fin:
-        return json.load(fin)
-
-
-def save_eraser_checkpoint(eraser: Any, checkpoint_dir: str, metadata: dict[str, Any]) -> None:
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    eraser.save_pretrained(checkpoint_dir, safe_serialization=True)
-    save_json(os.path.join(checkpoint_dir, "run_config.json"), metadata)
-
-
-def _jsonable(value: Any) -> Any:
-    if isinstance(value, torch.device):
-        return str(value)
-    if isinstance(value, dict):
-        return {str(k): _jsonable(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_jsonable(v) for v in value]
-    try:
-        json.dumps(value)
-        return value
-    except TypeError:
-        return str(value)
-
-
-def resolved_device_map(model: Any) -> Any:
-    device_map = getattr(model, "hf_device_map", None)
-    if device_map is not None:
-        return _jsonable(device_map)
-    try:
-        return {"": str(next(model.parameters()).device)}
-    except StopIteration:
-        return {}
-
-
-def cuda_environment() -> dict[str, Any]:
-    return {
-        "torch": torch.__version__,
-        "cuda": torch.version.cuda,
-        "cuda_available": bool(torch.cuda.is_available()),
-        "gpu_count": int(torch.cuda.device_count()) if torch.cuda.is_available() else 0,
-        "gpus": [
-            {
-                "index": int(idx),
-                "name": torch.cuda.get_device_name(idx),
-                "capability": ".".join(str(x) for x in torch.cuda.get_device_capability(idx)),
-            }
-            for idx in range(torch.cuda.device_count())
-        ]
-        if torch.cuda.is_available()
-        else [],
-    }
-
-
-def print_runtime_report(
-    *,
-    generator: Any,
-    placement: str,
-    dtype: torch.dtype,
-    attn_backend: str,
-) -> None:
-    env = cuda_environment()
-    print(f"GPU count={env['gpu_count']}")
-    for gpu in env["gpus"]:
-        print(f"GPU {gpu['index']}={gpu['name']} capability={gpu['capability']}")
-    print(f"Torch={env['torch']}, CUDA={env['cuda']}")
-    print(f"dtype={dtype_name(dtype)}")
-    print(f"attention_backend={attn_backend}")
-    print(f"placement={placement}")
-    print(f"generator_device_map={json.dumps(resolved_device_map(generator), sort_keys=True)}")
 
 
 class DisabledWandbRun:
