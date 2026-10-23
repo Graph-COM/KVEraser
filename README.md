@@ -4,52 +4,90 @@
 
 ![fig](theme_figure.png)
 
+Qwen3-8B LoRA KVEraser for localized context erasing, with pre-training, task-specific fine-tuning, and evaluation.
+
 ## Table of Contents
 
 - [Setup](#setup)
-- [Training](#training)
-- [KVEraser Evaluation](#kveraser-evaluation)
-- [Exact Recompute Baseline Evaluation](#exact-recompute-baseline-evaluation)
+- [Pretrained Checkpoint](#pretrained-checkpoint)
+- [Pre-training](#pre-training)
+- [Task-specific Fine-tuning](#task-specific-fine-tuning)
+- [Evaluation](#evaluation)
+- [Citation](#citation)
 
 ## Setup
 
 ```bash
-conda create -n kveraser python=3.11 -y
+conda create -n kveraser python=3.10 -y
 conda activate kveraser
+pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
 pip install -r requirements.txt
 ```
 
-Authenticate for W&B logging:
+W&B logging is optional and disabled by default. Run `wandb login`, then add `--wandb_mode online --wandb_project kv-eraser` to either training command to enable it.
+
+## Pretrained Checkpoint
+
+The released [LoRA adapter](https://huggingface.co/Graph-COM/KVEraser) includes pre-training and joint task-specific fine-tuning. Evaluate it directly:
 
 ```bash
-wandb login
+CUDA_VISIBLE_DEVICES=0 python evaluate.py \
+  --checkpoint Graph-COM/KVEraser \
+  --measure_performance --output_dir outputs/pretrained
 ```
 
-## Training
+The adapter, Qwen3-8B backbone, and [evaluation data](https://huggingface.co/datasets/Graph-COM/KVEraser) download automatically and are cached. Evaluation shares one backbone between eraser and generator, with the LoRA adapter resident in memory.
+
+## Pre-training
+
+Pre-train on 72,000 Wikipedia span-erasure samples, with 8,000 validation samples:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 python train.py \
-  --model Qwen/Qwen3-8B \
-  --output_dir checkpoints/kveraser_niah_joint \
-  --wandb_project kveraser-niah
+CUDA_VISIBLE_DEVICES=0,1,2,3 python pretrain.py \
+  --placement balanced \
+  --output_dir checkpoints/qwen3_8b/pretrain
 ```
 
-## KVEraser Evaluation
+Training data downloads automatically. Defaults are seed 42, one epoch, AdamW, LR `1e-5`, weight decay `0.01`, gradient clipping `1.0`, and gradient accumulation 8. LoRA uses rank 16, alpha 32, and dropout 0.
+
+## Task-specific Fine-tuning
+
+Jointly fine-tune on NIAH, HotpotQA, Natural Questions, TriviaQA, and ToolBench (11,491 training / 1,642 validation samples):
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python evaluate_kveraser.py \
-  --model Qwen/Qwen3-8B \
-  --checkpoint checkpoints/kveraser_niah_joint \
-  --placement single_gpu
+CUDA_VISIBLE_DEVICES=0,1,2,3 python finetune.py \
+  --checkpoint checkpoints/qwen3_8b/pretrain \
+  --placement balanced \
+  --output_dir checkpoints/qwen3_8b/finetune
 ```
 
-## Exact Recompute Baseline Evaluation
+This loads the pretrained adapter with a fresh optimizer and uses gradient accumulation 1; other defaults match pre-training. Each training directory contains the adapter, `run_config.json`, and `metrics.json`.
+
+## Evaluation
+
+Evaluate a local adapter on all 1,522 test samples: six NIAH lengths (1K–32K), 2Wiki, MuSiQue, IIRC, and BFCL.
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python evaluate_recompute.py \
-  --model Qwen/Qwen3-8B \
-  --placement single_gpu
+CUDA_VISIBLE_DEVICES=0 python evaluate.py \
+  --checkpoint checkpoints/qwen3_8b/finetune \
+  --measure_performance --output_dir outputs/finetune
 ```
+
+To evaluate the pre-training-only checkpoint, use `--checkpoint checkpoints/qwen3_8b/pretrain` and a separate output directory. Select a task with, for example, `--datasets eval/niah/ctx32000`.
+
+Full-recompute baseline:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python evaluate.py \
+  --method full-recompute \
+  --measure_performance --output_dir outputs/full-recompute
+```
+
+Other baselines: `--method discard`, `instruction`, `partial-erase`, or `partial-query`.
+
+Each evaluation writes per-sample JSONL and `summary.json` with EM, QA F1, and configuration. `--measure_performance` adds latency and CUDA memory; online timing excludes loading and initial prefill, and includes erasing/recomputation, query replay, and generation. Three warmup samples per dataset are excluded from the results.
+
+Use an empty output directory for each run. All three scripts accept `--data_root` for a local data root, `--cache_dir`, and `--local_files_only`. Data paths follow `qwen3_8b/v1/<pretrain|finetune|eval>/<task>/<variant>/<split>-*.parquet`. Use `--data_revision` and, when loading an adapter, `--checkpoint_revision` to select HF revisions; resolved commits are recorded in the output configuration.
 
 ## Citation
 

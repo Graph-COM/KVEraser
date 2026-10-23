@@ -35,9 +35,9 @@ from kveraser.runtime import (
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Evaluate a trained KVEraser on all NIAH test contexts.")
+    parser = argparse.ArgumentParser(description="Evaluate a full-model KVEraser checkpoint on all NIAH test contexts.")
     parser.add_argument("--model", default="Qwen/Qwen3-8B")
-    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--checkpoint", required=True, help="Local full-model checkpoint directory; use evaluate.py for LoRA adapters.")
     parser.add_argument("--contexts", default="all")
     parser.add_argument("--placement", choices=SUPPORTED_PLACEMENTS, default="single_gpu")
     parser.add_argument("--seed", type=int, default=42)
