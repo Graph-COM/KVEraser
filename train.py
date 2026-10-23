@@ -41,7 +41,7 @@ from kveraser.runtime import (
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Train one KVEraser on the six-context NIAH sweep.")
+    parser = argparse.ArgumentParser(description="Train a full-model KVEraser checkpoint on the six-context NIAH sweep.")
     parser.add_argument("--model", default="Qwen/Qwen3-8B")
     parser.add_argument("--contexts", default="all", help="Comma-separated context sizes, or 'all'.")
     parser.add_argument("--placement", choices=SUPPORTED_PLACEMENTS, default="balanced")
@@ -197,7 +197,7 @@ def build_metadata(args: argparse.Namespace, *, train_examples: int, generator: 
 
 def main(args: argparse.Namespace) -> None:
     if int(args.epochs) != 1:
-        raise ValueError("The paper protocol uses exactly one epoch; leave --epochs at 1 for release runs.")
+        raise ValueError("This NIAH training entry point requires --epochs 1.")
     require_cuda()
     set_seed(args.seed)
     dtype = dtype_from_name(args.dtype)
