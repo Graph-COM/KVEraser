@@ -24,8 +24,6 @@ pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
 pip install -r requirements.txt
 ```
 
-Requires CUDA with BF16 support. Tested with Python 3.10, PyTorch 2.6.0 / CUDA 12.4, and RTX 6000 Ada 48GB GPUs: four for training, one for evaluation.
-
 W&B logging is optional and disabled by default. Run `wandb login`, then add `--wandb_mode online --wandb_project kv-eraser` to either training command to enable it.
 
 ## Pretrained Checkpoint
