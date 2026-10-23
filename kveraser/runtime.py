@@ -1,23 +1,18 @@
 from __future__ import annotations
 
-import gc
 import json
 import os
 import random
-from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
+from huggingface_hub import snapshot_download
 from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
 
 
 SUPPORTED_PLACEMENTS = ("single_gpu", "balanced")
-SUPPORTED_ATTN_BACKENDS = ("sdpa", "flash_attention_2")
-
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def use_local_files_only() -> bool:
@@ -41,42 +36,6 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
-
-
-def cleanup_cuda() -> None:
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        try:
-            torch.cuda.ipc_collect()
-        except Exception:
-            pass
-
-
-def sync_for_timing() -> None:
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-
-
-def dtype_from_name(name: str) -> torch.dtype:
-    normalized = str(name).strip().lower()
-    if normalized in {"bf16", "bfloat16", "torch.bfloat16"}:
-        return torch.bfloat16
-    if normalized in {"fp16", "float16", "torch.float16"}:
-        return torch.float16
-    if normalized in {"fp32", "float32", "torch.float32"}:
-        return torch.float32
-    raise ValueError("--dtype must be one of: bf16, fp16, fp32.")
-
-
-def dtype_name(dtype: torch.dtype) -> str:
-    if dtype is torch.bfloat16:
-        return "bf16"
-    if dtype is torch.float16:
-        return "fp16"
-    if dtype is torch.float32:
-        return "fp32"
-    return str(dtype).replace("torch.", "")
 
 
 def _native_qwen3_max_length(model_config: Any) -> int | None:
@@ -111,13 +70,6 @@ def effective_model_max_length(tokenizer: Any, model_config: Any = None) -> int 
     return min(candidates) if candidates else None
 
 
-def validate_attn_backend(attn_backend: str, dtype: torch.dtype) -> None:
-    if attn_backend not in SUPPORTED_ATTN_BACKENDS:
-        raise ValueError(f"--attn_backend must be one of: {', '.join(SUPPORTED_ATTN_BACKENDS)}.")
-    if attn_backend == "flash_attention_2" and dtype not in {torch.float16, torch.bfloat16}:
-        raise RuntimeError("flash_attention_2 requires fp16 or bf16 weights.")
-
-
 def resolve_device_map(placement: str) -> dict[str, int] | str:
     if placement not in SUPPORTED_PLACEMENTS:
         raise ValueError(f"--placement must be one of: {', '.join(SUPPORTED_PLACEMENTS)}.")
@@ -132,41 +84,37 @@ def resolve_device_map(placement: str) -> dict[str, int] | str:
     return "balanced"
 
 
-def _from_pretrained(model_cls: Any, model_name_or_path: str, **kwargs: Any) -> Any:
-    try:
-        return model_cls.from_pretrained(model_name_or_path, **kwargs)
-    except TypeError as exc:
-        if "unexpected keyword argument 'dtype'" not in str(exc):
-            raise
-        kwargs["torch_dtype"] = kwargs.pop("dtype")
-        return model_cls.from_pretrained(model_name_or_path, **kwargs)
-
-
 def model_load_kwargs(
     placement: str,
     *,
-    dtype: torch.dtype,
-    attn_backend: str,
     local_files_only: bool,
-    use_safetensors: bool = True,
 ) -> dict[str, Any]:
-    validate_attn_backend(attn_backend, dtype)
     return {
-        "attn_implementation": attn_backend,
-        "dtype": dtype,
+        "attn_implementation": "sdpa",
+        "dtype": torch.bfloat16,
         "trust_remote_code": True,
         "device_map": resolve_device_map(placement),
         "local_files_only": local_files_only,
         "low_cpu_mem_usage": True,
-        "use_safetensors": use_safetensors,
+        "use_safetensors": True,
     }
 
 
-def load_tokenizer(model_name_or_path: str, *, local_files_only: bool | None = None) -> Any:
+def load_tokenizer(model_name_or_path: str, *, local_files_only: bool | None = None,
+                   revision: str | None = None, cache_dir: str | None = None) -> Any:
     if local_files_only is None:
         local_files_only = use_local_files_only()
+    local_path = Path(model_name_or_path).expanduser()
+    if local_path.is_dir():
+        model_name_or_path = str(local_path)
+    elif local_files_only:
+        # A local snapshot also prevents tokenizer-specific Hub metadata lookups.
+        model_name_or_path = snapshot_download(model_name_or_path, revision=revision,
+                                               cache_dir=cache_dir, local_files_only=True)
     return AutoTokenizer.from_pretrained(
         model_name_or_path,
+        revision=revision,
+        cache_dir=cache_dir,
         trust_remote_code=True,
         local_files_only=local_files_only,
     )
@@ -179,77 +127,48 @@ def freeze_model(model: Any) -> Any:
     return model
 
 
-def load_generator_model(
-    model_name_or_path: str,
-    *,
-    placement: str,
-    dtype: torch.dtype,
-    attn_backend: str,
-    local_files_only: bool | None = None,
-) -> Any:
+def load_training_models(
+    *, checkpoint=None, checkpoint_revision="main", placement="single_gpu",
+    cache_dir=None, local_files_only=None,
+):
+    """Load a frozen generator and a separate backbone with a trainable LoRA adapter."""
+    from .adapters import BASE_MODEL, BASE_REVISION, AdapterCheckpoint, initialize_adapter
+
     require_cuda()
     if local_files_only is None:
         local_files_only = use_local_files_only()
-    return freeze_model(
-        _from_pretrained(
-            AutoModelForCausalLM,
-            model_name_or_path,
-            **model_load_kwargs(
-                placement,
-                dtype=dtype,
-                attn_backend=attn_backend,
-                local_files_only=local_files_only,
-            ),
-        )
-    )
+    adapter = checkpoint
+    if checkpoint is not None and not isinstance(checkpoint, AdapterCheckpoint):
+        adapter = AdapterCheckpoint(checkpoint, revision=checkpoint_revision, cache_dir=cache_dir,
+                                    local_files_only=local_files_only)
+    kwargs = model_load_kwargs(placement, local_files_only=local_files_only)
+    kwargs.update(revision=BASE_REVISION, cache_dir=cache_dir)
+    generator = freeze_model(AutoModelForCausalLM.from_pretrained(BASE_MODEL, **kwargs))
+    backbone = AutoModel.from_pretrained(BASE_MODEL, **kwargs)
+    eraser = (initialize_adapter(backbone) if adapter is None
+              else adapter.load(backbone, trainable=True))
+    return generator, eraser
 
 
-def load_eraser_backbone(
-    model_name_or_path: str,
-    *,
-    placement: str,
-    dtype: torch.dtype,
-    attn_backend: str,
-    local_files_only: bool | None = None,
-) -> Any:
+def load_evaluation_models(
+    checkpoint="Graph-COM/KVEraser", *, checkpoint_revision="main", placement="single_gpu",
+    cache_dir=None, local_files_only=None,
+):
+    """Load a frozen BF16 backbone (None omits the adapter); route through KVEraser."""
+    from .adapters import BASE_MODEL, BASE_REVISION, AdapterCheckpoint
+
     require_cuda()
     if local_files_only is None:
         local_files_only = use_local_files_only()
-    return _from_pretrained(
-        AutoModel,
-        model_name_or_path,
-        **model_load_kwargs(
-            placement,
-            dtype=dtype,
-            attn_backend=attn_backend,
-            local_files_only=local_files_only,
-        ),
-    )
-
-
-def load_eraser_checkpoint(
-    checkpoint_dir: str,
-    *,
-    placement: str,
-    dtype: torch.dtype,
-    attn_backend: str,
-    local_files_only: bool | None = None,
-) -> Any:
-    eraser = load_eraser_backbone(
-        checkpoint_dir,
-        placement=placement,
-        dtype=dtype,
-        attn_backend=attn_backend,
-        local_files_only=local_files_only,
-    )
-    eraser.eval()
-    return eraser
-
-
-def parameter_counts(model: Any) -> tuple[int, int]:
-    total = sum(param.numel() for param in model.parameters())
-    trainable = sum(param.numel() for param in model.parameters() if param.requires_grad)
-    return int(trainable), int(total)
+    adapter = checkpoint
+    if checkpoint is not None and not isinstance(checkpoint, AdapterCheckpoint):
+        adapter = AdapterCheckpoint(checkpoint, revision=checkpoint_revision, cache_dir=cache_dir,
+                                    local_files_only=local_files_only)
+    kwargs = model_load_kwargs(placement, local_files_only=local_files_only)
+    kwargs.update(revision=BASE_REVISION, cache_dir=cache_dir)
+    generator = freeze_model(AutoModelForCausalLM.from_pretrained(BASE_MODEL, **kwargs))
+    eraser = None if adapter is None else adapter.load(generator.base_model)
+    return generator, eraser
 
 
 def save_json(path: str, payload: Any) -> None:
@@ -259,78 +178,6 @@ def save_json(path: str, payload: Any) -> None:
     with open(path, "w", encoding="utf-8") as fout:
         json.dump(payload, fout, indent=2, sort_keys=True)
         fout.write("\n")
-
-
-def load_json(path: str) -> Any:
-    with open(path, "r", encoding="utf-8") as fin:
-        return json.load(fin)
-
-
-def save_eraser_checkpoint(eraser: Any, checkpoint_dir: str, metadata: dict[str, Any]) -> None:
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    eraser.save_pretrained(checkpoint_dir, safe_serialization=True)
-    save_json(os.path.join(checkpoint_dir, "run_config.json"), metadata)
-
-
-def _jsonable(value: Any) -> Any:
-    if isinstance(value, torch.device):
-        return str(value)
-    if isinstance(value, dict):
-        return {str(k): _jsonable(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_jsonable(v) for v in value]
-    try:
-        json.dumps(value)
-        return value
-    except TypeError:
-        return str(value)
-
-
-def resolved_device_map(model: Any) -> Any:
-    device_map = getattr(model, "hf_device_map", None)
-    if device_map is not None:
-        return _jsonable(device_map)
-    try:
-        return {"": str(next(model.parameters()).device)}
-    except StopIteration:
-        return {}
-
-
-def cuda_environment() -> dict[str, Any]:
-    return {
-        "torch": torch.__version__,
-        "cuda": torch.version.cuda,
-        "cuda_available": bool(torch.cuda.is_available()),
-        "gpu_count": int(torch.cuda.device_count()) if torch.cuda.is_available() else 0,
-        "gpus": [
-            {
-                "index": int(idx),
-                "name": torch.cuda.get_device_name(idx),
-                "capability": ".".join(str(x) for x in torch.cuda.get_device_capability(idx)),
-            }
-            for idx in range(torch.cuda.device_count())
-        ]
-        if torch.cuda.is_available()
-        else [],
-    }
-
-
-def print_runtime_report(
-    *,
-    generator: Any,
-    placement: str,
-    dtype: torch.dtype,
-    attn_backend: str,
-) -> None:
-    env = cuda_environment()
-    print(f"GPU count={env['gpu_count']}")
-    for gpu in env["gpus"]:
-        print(f"GPU {gpu['index']}={gpu['name']} capability={gpu['capability']}")
-    print(f"Torch={env['torch']}, CUDA={env['cuda']}")
-    print(f"dtype={dtype_name(dtype)}")
-    print(f"attention_backend={attn_backend}")
-    print(f"placement={placement}")
-    print(f"generator_device_map={json.dumps(resolved_device_map(generator), sort_keys=True)}")
 
 
 class DisabledWandbRun:

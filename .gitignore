@@ -1,8 +1,14 @@
 tools/
 tests/
+docs/
 __pycache__/
 **/__pycache__/
 *.py[cod]
 wandb/
 outputs/
 checkpoints/
+
+# Local Codex configuration
+/.codex/config.toml
+
+/kveraser-release-plan.md
